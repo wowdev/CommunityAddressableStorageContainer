@@ -127,7 +127,9 @@ cdn = socketserver.TCPServer(("", 80), request_handler)
 threads = []
 for server in [configs, cdn]:
   thread = threading.Thread (target = server.serve_forever)
+  thread.daemon = True
   thread.start() 
  
-for thread in threads: 
-  thread.join()
+import time
+while True:
+    time.sleep(1)
