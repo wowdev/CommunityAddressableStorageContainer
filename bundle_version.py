@@ -26,6 +26,7 @@ class version_bundler:
     self.cdn_prefix = self.product
     self.encodings = []
     self.root_entries = []
+    self.archive_list = []
     
   def cdn_path_prefix(self, type):
     return os.path.join ("tpr", self.cdn_prefix, type)
@@ -99,26 +100,26 @@ class version_bundler:
       blocks_a_register += block[0].raw_hash
       blocks_a_register += b'block_hash_what?'
       for entry in block:
-        blocks_a += bin.uint8_t (1)
-        blocks_a += bin.BE_uint40_t (entry.size)
-        blocks_a += entry.raw_hash
-        blocks_a += entry.encoded_hash
+        blocks_a += bin.uint8_t (1)                # number of keys
+        blocks_a += bin.BE_uint40_t (entry.size)   # fileSize
+        blocks_a += entry.raw_hash                 # raw hash
+        blocks_a += entry.encoded_hash             # encoded hashes
       padding_len = block_size - len(block) * entry_size
       blocks_a += b'\0' * padding_len
                
     return header + blocks_a_register + blocks_a
     
   class wow_root_entry:
-    def __init__(self, fdid, content_hash, name_key):
-      self.flags = 0
-      self.locale = 0xFFFFFFFF
+    def __init__(self, fdid, content_hash, name_key, locale, flags):
+      self.flags = flags
+      self.locale = locale
       self.fdid = fdid
       self.content_hash = content_hash
       self.name_key = name_key
     def __repr__(self):
       return "{} = {}, {}".format(self.fdid, str(self.content_hash), str(self.name_key))
-  def add_root(self, fdid, content_hash, name_key):
-    self.root_entries += [version_bundler.wow_root_entry(fdid, content_hash, name_key)]
+  def add_root(self, fdid, content_hash, name_key, locale = 0xFFFFFFFF, flags = 0):
+    self.root_entries += [version_bundler.wow_root_entry(fdid, content_hash, name_key, locale, flags)]
 
   def root(self, type):
     return self.write_encoded(self.cdn_path_prefix("data"), self.root_data(type))
@@ -128,10 +129,9 @@ class version_bundler:
       
     self.root_entries.sort(key=attrgetter('flags', 'locale'))
     blocks = [list(g) for k, g in itertools.groupby(self.root_entries, key=attrgetter('flags', 'locale'))]
-      
+    
     def cas_record(record):
       return record.content_hash + record.name_key
-    #! \todo obvious bogus, once again
     def cas_block(records):
       records.sort(key=attrgetter('fdid'))
       
@@ -144,8 +144,8 @@ class version_bundler:
       return ( bin.uint32_t (len(records))      # num_records
              + bin.uint32_t (records[0].flags)  # flags
              + bin.uint32_t (records[0].locale) # locale
-             + bin.many(bin.uint32_t, ids)   # filedata id deltas
-             + bin.many(cas_record, records) # records
+             + bin.many (bin.uint32_t, ids)     # filedata id deltas
+             + bin.many (cas_record, records)   # records
              )
     return bin.many (cas_block, blocks)
     
@@ -154,8 +154,8 @@ class version_bundler:
   def install_data(self):
     # todo: obviously bogus
     return ( b'IN'
-           + bin.uint8_t (1)    # version
-           + bin.uint8_t (0x10) # hashSize
+           + bin.uint8_t (1)     # version
+           + bin.uint8_t (0x10)  # hashSize
            + bin.BE_uint16_t (0) # num_tags
            + bin.BE_uint32_t (0) # num_entries
            )
@@ -171,19 +171,43 @@ class version_bundler:
     lines += [u"encoding = {} {}".format (encoding_raw, encoding_blte)]
     return bytes('\n'.join(lines), 'utf8')
     
-  def archive(self):
-    #! \todo bogus
-    archive_hash = u"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    #! \todo bogus
+  class archive_info:
+    def __init__(self, entries):
+      self.entries = entries
+  def add_archive(self, entries):
+    self.archive_list += [version_bundler.archive_info(entries)]
+  def archives(self):
+    return sorted(list(set([self.archive(info) for info in self.archive_list])))
+  def archive(self, info):
     archive_data = bytes()
+    index_data = bytes()
     
-    entries = []
+    class archive_entry_in_file:
+      def __init__(self, hash, size, offset):
+        self.header_hash_md5 = hash # I have no idea what exactly is hashed here.
+        self.encoded_size = size
+        self.offset_to_blte_encoded_data_in_archive = offset
+        
+    in_file_entries = {}
+    offset = 0
     
-    class archive_entry:
-      def __init__(self):
-        self.header_hash_md5 = b'               '
-        self.encoded_size = 0
-        self.offset_to_blte_encoded_data_in_archive = 0
+    for entry in info.entries:
+      content_hash = bin.hex(md5(entry))
+      if content_hash in in_file_entries:
+        continue
+      
+      encoded_data = blte.encode_dumb (entry)
+      size = len(encoded_data)
+      encoded_hash = bin.hex(md5(encoded_data))
+      
+      archive_data += encoded_data
+      in_file_entries[content_hash] = archive_entry_in_file(encoded_hash, size, offset)
+      self.encodings += [version_bundler.encoding_entry (size, content_hash, encoded_hash)]
+
+      offset += size
+   
+    if offset != len(archive_data):
+      raise Exception ("offset {} != len(archive_data) {}".format(offset, len(archive_data)))
     
     def index_entry(entry):
       return ( entry.header_hash_md5   # md5 == 16 bytes
@@ -192,21 +216,24 @@ class version_bundler:
              )
     index_entry_size = 16 + 4 + 4
     index_block_size = 0x1000
-    index_block_entry_count = divru(index_entry_size, index_block_size)
-    index_block_count = divru (len(entries), index_block_entry_count)
+    index_block_entry_count = divru(index_block_size, index_entry_size)
+    index_block_count = divru (len(info.entries), index_block_entry_count)
     
     def index_block(entries):
       if len(entries) > index_block_entry_count:
-        raise Exception("logic error: more entries per block than per block")
+        raise Exception("len(entries) {} > index_block_entry_count {}".format(len(entries), index_block_entry_count))
       res = bytes()
       res += bin.many (index_entry, entries)
       res += b'\0' * (index_block_size - len(entries) * index_entry_size)
       return res
       
-    index_data = bytes()
-    index_data += bin.many(index_block, entries)
-    index_data += b'last_hash_of_blk' * len(entries)
-    index_data += b'lower_md5_of_blk' * (len(entries) - 1)
+    def by_header_hash(entry):
+      return entry.header_hash_md5
+    index_chunks = [sorted(list(in_file_entries.values()), key=by_header_hash)] # todo split by size
+      
+    index_data += bin.many(index_block, index_chunks)
+    index_data += b'last_hash_of_blk' * len(index_chunks)
+    index_data += b'lower_md5_of_blk' * (len(index_chunks) - 1)
     
     index_data += ( b'idx_blck'                   # index_block_hash
                   + b'toc_hash'                   # toc_hash
@@ -218,21 +245,21 @@ class version_bundler:
                   + bin.uint8_t (4)               # sizeBytes
                   + bin.uint8_t (16)              # keySizeInBytes
                   + bin.uint8_t (8)               # checksumSize
-                  + bin.uint32_t(len (entries))   # numElements. TODO: bigendian in _old_ versions
+                  + bin.uint32_t(len (in_file_entries)) # numElements or num chunks?. TODO: bigendian in _old_ versions
                   + b'halfmd5_'                   # lower_part_of_md5_of_footer
                   )
                   
+    #! \todo bogus
+    archive_hash = md5(archive_data) 
     self.write(os.path.join(self.cdn_path_prefix("data"), self.md5path(archive_hash)), archive_data)
     self.write(os.path.join(self.cdn_path_prefix("data"), self.md5path(archive_hash + ".index")), index_data)
     return archive_hash
     
   def cdn_config(self):
     return self.write_md5(self.cdn_path_prefix("config"), self.cdn_config_data())
-  def cdn_config_data(self):
-    archives = [self.archive()]
-    
+  def cdn_config_data(self):    
     lines = []
-    lines += [u"archives = {}".format (u' '.join(archives))]
+    lines += [u"archives = {}".format (u' '.join(self.archives()))]
     return bytes('\n'.join(lines), 'utf8')
     
   def cdns(self, cdns_by_region):
@@ -247,8 +274,8 @@ class version_bundler:
     lines += ["Region!STRING:0|BuildConfig!HEX:16|CDNConfig!HEX:16|KeyRing!HEX:16|BuildId!DEC:4|VersionsName!String:0|ProductConfig!HEX:16"]
     #! \todo this is obviously broken
     for region in ['eu']:
+      cdnconfig = self.cdn_config()     # archives have the side effect of adding to encoding, so go first
       buildconfig = self.build_config()
-      cdnconfig = self.cdn_config()
       buildid = 1
       versionname = "0.0.1.{}".format (buildid)
       lines += ["{}|{}|{}||{}|{}|".format(region, buildconfig, cdnconfig, buildid, versionname)]
@@ -257,9 +284,16 @@ class version_bundler:
 # todo: at least cascexplorer really depends on this product string
 bundler = version_bundler (os.path.realpath(u"wwwroot"), u"wow")
 
-bundler.add_root(21, b'content_hash____', jenkins.hashpath('interface/cinematics/logo_1024.avi'))
-bundler.add_root(22, b'content_hash____', jenkins.hashpath('interface/cinematics/wow_intro_1024.avi'))
-bundler.add_root(53183, b'content_hash____', jenkins.hashpath('sound/music/citymusic/darnassus/darnassus intro.mp3'))
+file_a = b'foo bar' # 1FE6C5BDB08C9FEA63FFAD4D0533565F
+file_b = b'aaaaaaa' # 0A8392B97B5BEF3904A8031FED9B8AF8
+file_c = file_a # b'baz foo'
+
+bundler.add_root(21, bin.hex(md5(file_a)), jenkins.hashpath('interface/cinematics/logo_1024.avi'))
+bundler.add_root(22, bin.hex(md5(file_b)), jenkins.hashpath('interface/cinematics/wow_intro_1024.avi'))
+bundler.add_root(53183, bin.hex(md5(file_c)), jenkins.hashpath('sound/music/citymusic/darnassus/darnassus intro.mp3'))
+bundler.add_archive([file_a])
+bundler.add_archive([file_b])
+#bundler.add_archive([file_c])
 
 bundler.cdns({'eu': ['localhost']})
 bundler.versions()
