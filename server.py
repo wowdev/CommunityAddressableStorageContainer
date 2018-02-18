@@ -4,6 +4,7 @@ import sys
 import os
 import threading
 import hashlib
+import urllib
 
 class request_handler(http.server.SimpleHTTPRequestHandler):
   def translate_path (self, path):
