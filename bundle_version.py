@@ -3,7 +3,6 @@ import sys
 import bin
 import hashlib
 import blte
-import binascii
 from operator import itemgetter, attrgetter, methodcaller
 import itertools
 import jenkins
@@ -53,8 +52,8 @@ class version_bundler:
     raw_hash, encoded_hash = md5(data), self.write_md5(path, blte.encode_dumb(data))
     #! \todo is len(data) correct?
     self.encodings += [ version_bundler.encoding_entry ( len(data)
-                                                       , binascii.unhexlify(raw_hash)
-                                                       , binascii.unhexlify(encoded_hash)
+                                                       , bin.hex(raw_hash)
+                                                       , bin.hex(encoded_hash)
                                                        )
                       ]
     return raw_hash, encoded_hash

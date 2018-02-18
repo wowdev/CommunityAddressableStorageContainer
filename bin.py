@@ -1,3 +1,4 @@
+import binascii
 import struct
 
 def uint8_t(value):
@@ -25,3 +26,8 @@ def many(fun, values):
   for value in values:
     res += fun(value)
   return res
+
+def hex(string):
+  return bytes(binascii.unhexlify(string))
+def BE_hex(string):
+  return hex(string)[::-1]
