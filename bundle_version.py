@@ -68,7 +68,8 @@ class version_bundler:
       return entry.encoded_hash
     self.encodings.sort(key=sort_key)
     
-    # todo: multiple keys per entry (-> non-fixed size)
+    # todo: multiple keys per entry (-> non-fixed size), should rather
+    #       iterate all encodings and chunk while iterating
     entry_size = ( 1     # uint8_t keyCount
                  + 5     # uint40_t fileSize
                  + 0x10  # char[16] contentHash
@@ -76,38 +77,73 @@ class version_bundler:
                  )
     entry_count = len(self.encodings)
     block_size = 4096
-    entries_per_block = divru(entry_size * entry_count, block_size)
+    entries_per_block = int(block_size / entry_size)
     blocks = list(chunk (self.encodings, entries_per_block))
     #assert (sum(len(blocks)) == len(self.encodings)
-  
-    # todo self.encodings actually
-    header = ( b'EN'                         # magic
-             + bin.uint8_t (0)               # version
-             + bin.uint8_t (0x10)            # checksumSizeA
-             + bin.uint8_t (0x10)            # checksumSizeB
-             + bin.uint16_t (0)              # flagsA
-             + bin.uint16_t (0)              # flagsB
-             # todo: is this block count or entries????
-             + bin.BE_uint32_t (len(blocks)) # numEntriesA
-             + bin.BE_uint32_t (0)           # numEntriesB
-             + bin.BE_uint40_t (0)           # stringBlockSize
-             )
              
+    string_block_a = bytes()
     blocks_a_register = bytes()
-    blocks_a = bytes() # note: size % block_size == 0
+    blocks_a = bytes()
+    blocks_a_count = 0
+    blocks_b_register = bytes()
+    blocks_b = bytes()
+    blocks_b_count = 0
+    string_block_b = b'b:{*=n}'
+    
     for block in blocks:
-      # todo: raw or encoded?
-      blocks_a_register += block[0].raw_hash
-      blocks_a_register += b'block_hash_what?'
+      block_a_data = bytes()
       for entry in block:
-        blocks_a += bin.uint8_t (1)                # number of keys
-        blocks_a += bin.BE_uint40_t (entry.size)   # fileSize
-        blocks_a += entry.raw_hash                 # raw hash
-        blocks_a += entry.encoded_hash             # encoded hashes
-      padding_len = block_size - len(block) * entry_size
-      blocks_a += b'\0' * padding_len
+        block_a_data += ( bin.uint8_t (1)                # 00 number of keys
+                        + bin.BE_uint40_t (entry.size)   # 01 fileSize
+                        + entry.raw_hash                 # 06 raw hash
+                        + entry.encoded_hash             # 16 encoded hashes
+                        )                                # 26
+      block_a_data += b'\0' * (block_size - len(block_a_data))
+      
+      blocks_a += block_a_data
+      blocks_a_register += ( block[0].raw_hash
+                           + bin.hex (md5 (block_a_data))
+                           )
+      blocks_a_count += 1
+      
+    block_b_eof = b'\0' * 16 + b'\xff' * 4
+    for block in []:
+      block_b_data = bytes()
+      for entry in block:
+        block_b_data += ( entry.hash
+                        + bin.BE_uint32_t (stringIndex)
+                        + bin.BE_uint40_t (size)
+                        )
+      if True: # is_last:
+        block_b_data += block_b_eof
+      block_b_data += b'\0' * (block_size - len(block_b_data))
+      
+      blocks_b += block_b_data
+      blocks_b_register += ( block[0].hash
+                           + bin.hex (md5 (block_b_data))
+                           )
+      blocks_b_count += 1
+      
+    header = ( b'EN'                                  # 00 magic
+             + bin.uint8_t (0)                        # 02 version
+             + bin.uint8_t (0x10)                     # 03 checksumSizeA
+             + bin.uint8_t (0x10)                     # 04 checksumSizeB
+             + bin.uint16_t (0)                       # 05 flagsA
+             + bin.uint16_t (0)                       # 07 flagsB
+             + bin.BE_uint32_t (blocks_a_count)       # 09 numEntriesA
+             + bin.BE_uint32_t (blocks_b_count)       # 0d numEntriesB
+             + bin.BE_uint40_t (len (string_block_a)) # 11 stringBlockSize
+                                                      # 16
+             )
                
-    return header + blocks_a_register + blocks_a
+    return ( header
+           + string_block_a   
+           + blocks_a_register
+           + blocks_a
+           + blocks_b_register
+           + blocks_b
+           + string_block_b
+           )
     
   class wow_root_entry:
     def __init__(self, fdid, content_hash, name_key, locale, flags):
