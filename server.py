@@ -65,12 +65,25 @@ class request_handler(http.server.SimpleHTTPRequestHandler):
           break
       else:
         return self.list_directory(path)
-    ctype = self.guess_type(path)
+        
     try:
       f = open(path, 'rb')
     except OSError:
-      self.send_error(http.HTTPStatus.NOT_FOUND, "File not found")
-      return None
+      try:
+        fallback_url = '185.60.112.106:1119' if not "tpr" in self.path else 'blzddist1-a.akamaihd.net:80'
+        client = http.client.HTTPConnection(fallback_url)
+        print ("forwarding", self.path)
+        client.request("GET", self.path)
+        data = client.getresponse().read()
+        
+        os.makedirs("wwwroot/" + os.path.dirname(self.path), exist_ok = True)
+        open(path, 'wb').write (data)
+        f = open(path, 'rb')
+      except Exception as ex:
+        self.send_error(http.HTTPStatus.NOT_FOUND, str(ex))
+        return None
+      
+    ctype = self.guess_type(path)
       
     fs = os.fstat(f.fileno())
     file_len = fs[6]
