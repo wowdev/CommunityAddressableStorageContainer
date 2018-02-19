@@ -219,38 +219,53 @@ class version_bundler:
     index_block_entry_count = divru(index_block_size, index_entry_size)
     index_block_count = divru (len(info.entries), index_block_entry_count)
     
+    last_hashes = bytes()
+    block_hashes = bytes()
+    
     def index_block(entries):
+      nonlocal last_hashes
+      nonlocal block_hashes
       if len(entries) > index_block_entry_count:
         raise Exception("len(entries) {} > index_block_entry_count {}".format(len(entries), index_block_entry_count))
       res = bytes()
       res += bin.many (index_entry, entries)
+      last_hashes += entries[-1].header_hash_md5
       res += b'\0' * (index_block_size - len(entries) * index_entry_size)
+      block_hashes += bin.hex (md5 (res))[:8] # TODO: or -8:?
       return res
       
     def by_header_hash(entry):
       return entry.header_hash_md5
     index_chunks = [sorted(list(in_file_entries.values()), key=by_header_hash)] # todo split by size
       
-    index_data += bin.many(index_block, index_chunks)
-    index_data += b'last_hash_of_blk' * len(index_chunks)
-    index_data += b'lower_md5_of_blk' * (len(index_chunks) - 1)
+    blocks = bin.many(index_block, index_chunks)
+    index_data += blocks
+    toc = last_hashes + block_hashes[:-8]
+    index_data += toc
     
-    index_data += ( b'idx_blck'                   # index_block_hash
-                  + b'toc_hash'                   # toc_hash
-                  + bin.uint8_t (1)               # version
-                  + bin.uint8_t (0)               # _11
-                  + bin.uint8_t (0)               # _12
-                  + bin.uint8_t (4)               # _13
-                  + bin.uint8_t (4)               # offsetBytes
-                  + bin.uint8_t (4)               # sizeBytes
-                  + bin.uint8_t (16)              # keySizeInBytes
-                  + bin.uint8_t (8)               # checksumSize
-                  + bin.uint32_t(len (in_file_entries)) # numElements or num chunks?. TODO: bigendian in _old_ versions
-                  + b'halfmd5_'                   # lower_part_of_md5_of_footer
+    index_block_hash = bin.hex (md5 (blocks[-index_block_size:]))[:8]
+    index_data += index_block_hash                                # 00 index_block_hash
+    toc_hash = bin.hex (md5 (toc + index_block_hash))[:8]
+    index_data += toc_hash                                        # 08 toc_hash
+    
+    footer_without_hashes = ( bin.uint8_t (1)                     # 10 version
+                            + bin.uint8_t (0)                     # 11 _11
+                            + bin.uint8_t (0)                     # 12 _12
+                            + bin.uint8_t (4)                     # 13 _13
+                            + bin.uint8_t (4)                     # 14 offsetBytes
+                            + bin.uint8_t (4)                     # 15 sizeBytes
+                            + bin.uint8_t (16)                    # 16 keySizeInBytes
+                            + bin.uint8_t (8)                     # 17 checksumSize
+                            + bin.uint32_t(len (in_file_entries)) # 18 numElements or num chunks?. TODO: bigendian in _old_ versions
+                                                                  # 1c
+                            )
+    index_data += ( footer_without_hashes                                # 10
+                  + bin.hex (md5(footer_without_hashes + b'\0' * 8))[:8] # 1c lower_part_of_md5_of_footer.
+                                                                         # 24
                   )
                   
     #! \todo bogus
-    archive_hash = md5(archive_data) 
+    archive_hash = md5(index_data[-0x1c:]) 
     self.write(os.path.join(self.cdn_path_prefix("data"), self.md5path(archive_hash)), archive_data)
     self.write(os.path.join(self.cdn_path_prefix("data"), self.md5path(archive_hash + ".index")), index_data)
     return archive_hash
