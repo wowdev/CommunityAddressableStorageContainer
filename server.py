@@ -112,9 +112,10 @@ class request_handler(http.server.SimpleHTTPRequestHandler):
     else:
       self.send_response(http.HTTPStatus.OK)
       self.send_header("Content-Length", str(file_len))
-      self.send_header("Etag", hashlib.md5(f.read()).hexdigest())
       self.range = None
       
+    self.send_header("ETag", '"{}:{}"'.format(hashlib.md5(f.read()).hexdigest(), int(fs.st_mtime)))
+
     try:
       self.send_header("Content-type", ctype)
       self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
